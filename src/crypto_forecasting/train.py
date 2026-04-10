@@ -5,16 +5,24 @@ import seaborn as sns
 import json
 from tqdm import tqdm
 import argparse
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from preprocessing.data import get_crypto_dataset
-from preprocessing.utils import *
-from models.components import GCN, LSTM
-from models.combined_model import AdditiveGraphLSTM, SequentialGraphLSTM
+from .data import get_crypto_dataset, get_mock_crypto_dataset
+from .utils import *
+from .components import GCN, LSTM
+from .combined_model import AdditiveGraphLSTM, SequentialGraphLSTM
+
+
+PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parent.parent
+
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
+FIGURE_DIR = PROJECT_ROOT / "figures"
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # where to perform training
@@ -92,16 +100,20 @@ def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={
 
 
 def plot_loss(losses, model_name):
+    FIGURE_DIR.mkdir("figures", exist_ok = True)
+
     fig = plt.figure(figsize=(10,5))
     plt.plot(range(len(losses)), losses)
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.show()
-    fig.savefig('figures/{}_training_loss.pdf'.format(model_name)) # can be a variable command line arg or something
+    fig.savefig(str(FIGURE_DIR /f"{model_name}_training_loss.pdf"))
 
 
-def main(mode, technicals, epochs, model_name):
+def main(mode, technicals, epochs, model_name, use_mock_data = False):
+
     print('Creating model...')
+
     if mode == 'lstm':
         model = LSTM(input_size=98+14*len(technicals), hidden_size=14, batch_first=True, predict=True)
     elif mode == 'gcn':
@@ -110,24 +122,32 @@ def main(mode, technicals, epochs, model_name):
         model = AdditiveGraphLSTM(n_features=7+len(technicals), lstm_hidden_dim=14, gcn_pred_per_node=3) # 7 pre-existing features
     else:
         model = SequentialGraphLSTM(n_features=7+len(technicals), lstm_hidden_dim=14, gcn_pred_per_node=3) # 7 pre-existing features
+    
     model.float()
     print('Model created.\n')
     print('Creating dataset...')
-    if model == 'gcn':
-        # gcn only takes one market state at a time for now
-        dataset = get_crypto_dataset(seq_len=1, technicals=technicals)
+
+    if mode == 'gcn':
+        seq_len = 1
     else:
-        dataset = get_crypto_dataset(seq_len=10, technicals=technicals) # length 10 window was good in other papers, could tune if desired
-    print('Dataset created.\n')
+        seq_len = 10
+
+    if use_mock_data:
+        dataset = get_mock_crypto_dataset(seq_len=seq_len, technicals=technicals, n_samples=100)
+    else:
+        dataset = get_crypto_dataset(seq_len=seq_len, technicals=technicals)
+
     optimizer = optim.SGD(model.parameters(), lr=1e-4, momentum=0.9) # can play around with this one
     criterion = nn.MSELoss() # regression problem so going just with MSE
 
     print('Starting training...')
     model, losses = train(model, dataset, optimizer, criterion, epochs=epochs, mode=mode) # change up number of epochs depending on loss plot
     print('Model trained. Saving model...')
-    model.save('model checkpoints/{}.pth'.format(model_name)) # replace this probably with command line arg or something, hard coded to fill out skeleton
-    print('Model saved.')
 
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    model.save(str(CHECKPOINT_DIR / f"{model_name}.pth"))
+
+    print('Model saved.')
     plot_loss(losses, model_name)
 
 
@@ -142,6 +162,8 @@ if __name__ == '__main__':
                         help='Number of epochs to train model for')
     parser.add_argument('--model_name', dest='model_name', required=True,
                         help='Name for saving model to local directory')
+    parser.add_argument('--use_mock_data', action='store_true',
+                    help='Use small synthetic dataset instead of Kaggle data')
     args = parser.parse_args()
 
     with open(args.technicals_config, 'r') as file:
@@ -150,4 +172,4 @@ if __name__ == '__main__':
     for k, v in config.items():
         config[k] = eval(v)
 
-    main(args.mode, config, int(args.epochs), args.model_name)
+    main(args.mode, config, int(args.epochs), args.model_name, args.use_mock_data)

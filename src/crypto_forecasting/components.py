@@ -45,6 +45,27 @@ class LSTM(BaseModel):
         self.hidden_state = (torch.zeros(self.num_layers, batch_size, self.hidden_size), torch.zeros(self.num_layers, batch_size, self.hidden_size))
 
     def forward(self, x, hidden_state=None):
+    """
+    Run the LSTM over a sequence of flattened asset features.
+
+    Args:
+        x: torch.Tensor of shape (batch_size, seq_len, input_size), where:
+            - batch_size is the number of sequences in the batch
+            - seq_len is the number of time steps
+            - input_size is the total feature dimension across all assets
+
+    Returns:
+        If predict=True:
+            tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
+            - predictions of shape (batch_size, 14)
+            - hidden state tuple (h_n, c_n), each of shape (1, batch_size, hidden_size)
+
+        Otherwise:
+            tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
+            - sequence output of shape (batch_size, seq_len, hidden_size)
+            - hidden state tuple (h_n, c_n)
+    """
+
         if hidden_state is not None:
             self.hidden_state = hidden_state
         output, hidden_state = self.lstm(x, self.hidden_state)
@@ -66,44 +87,64 @@ class GraphConv(nn.Module):
             activation: str, activation function to use
             adj: np.ndarray, optional adjacency matrix if fixed for every iteration
         """
+
         super().__init__()
+
         if adj is not None:
             # constant adjacency convolutions
-            if adj[0,0] == 0:
-                self.a = torch.tensor(adj + np.eye(adj.shape[0]), requires_grad=False)
-            else:
-                self.a = torch.tensor(adj, requires_grad=False)
-            
-            self.d_inv = np.linalg.inv( torch.sum(self.a, axis=1) )
-            self.sqrt_d_inv = sqrtm(self.d_inv)
+            adj_tensor = torch.as_tensor(adj, dtype = torch.float32)
 
-        # kinda shitty initializations but works for now
-        self.weight = nn.Parameter(torch.zeros(in_dim, out_dim, dtype=torch.float))
-        self.bias = nn.Parameter(torch.zeros(out_dim, dtype=torch.float))
+            if adj_tensor[0, 0] == 0:
+                adj_tensor = adj_tensor + torch.eye(adj_tensor.shape[0], dtype = adj_tensor.dtype)
+            self.register_buffer("a", adj_tensor)
+        
+        else:
+            self.a = None
+
+        self.weight = nn.Parameter(torch.empty(in_dim, out_dim, dtype=torch.float))
+        self.bias = nn.Parameter(torch.empty(out_dim, dtype=torch.float))
+
+        nn.init.xavier_uniform_(self.weight)
+        nn.init.zeros_(self.bias)
 
         if activation == 'relu':
             self.activation = nn.ReLU()
         elif activation == 'tanh':
             self.activation = nn.Tanh()
+        else:
+            raise ValueError("Activation must be 'relu' or 'tanh'.")
 
     def forward(self, x, a=None):
+    """
+    Apply one graph convolution step.
+
+    Args:
+        x: torch.Tensor of shape (n_nodes, in_dim).
+            Node feature matrix, where:
+            - n_nodes is the number of assets/nodes
+            - in_dim is the number of input features per node
+
+        a: torch.Tensor of shape (n_nodes, n_nodes), optional.
+            Adjacency matrix. If not provided, uses the fixed adjacency
+            stored on the module.
+
+    Returns:
+        torch.Tensor of shape (n_nodes, out_dim).
+        Transformed node features after adjacency aggregation,
+        linear transformation, activation, and bias.
+    """
+
         if a is None:
+            if self.a is None:
+                raise ValueError('Adjacency matrix must be provided when no fixed adjacency was set.')
             a = self.a
-            sqrt_d_inv = self.sqrt_d_inv
+    
         else:
+            a = a.to(dtype = self.weight.dtype, device = x.device)
             if a[0,0] == 0:
-                a += torch.eye(a.shape[0])
-            
-            a.type(self.weight.dtype)
-            
-            # traditionally have D^(-1/2)AD^(-1/2) but correlation matrix has negative values so D^(-1/2) becomes ill-defined
-            # d_inv = np.linalg.inv( torch.diag(torch.sum(a, axis=1)) )
-            # sqrt_d_inv = torch.tensor(sqrtm(d_inv), dtype=self.weight.dtype)
-            # sqrt_d_inv = torch.diag( torch.sqrt(1 / torch.sum(a, axis=1)) ) # simple since inverse of diagonal matrix
+                a = a + torch.eye(a.shape[0], dtype = a.dtype, device = a.device)
 
         x = torch.matmul(x, self.weight)
-        # adj_inter = torch.matmul(torch.matmul(sqrt_d_inv, a), sqrt_d_inv) # intermediate step in adjacency matrix calculations
-        # output = torch.matmul(torch.matmul(), x)
         output = torch.matmul(a, x)
         return self.activation(output) + self.bias
 
@@ -111,7 +152,7 @@ class GraphConv(nn.Module):
 class GCN(BaseModel):
     def __init__(self, n_features, n_pred_per_node, predict=False) -> None:
         """
-        Graph convoluation model
+        Graph convolution model
 
         Args:
             n_features: int, number of features per node (asset)
@@ -125,8 +166,27 @@ class GCN(BaseModel):
             self.fc = nn.Linear(14*n_pred_per_node, 14)
 
     def forward(self, x, adj=None):
+    """
+    Run the graph model on one sample.
+
+    Args:
+        x: torch.Tensor of shape (n_nodes, n_features) or (1, n_nodes, n_features).
+            Node features for all assets.
+
+        adj: torch.Tensor of shape (n_nodes, n_nodes).
+            Adjacency matrix describing asset relationships.
+
+    Returns:
+        torch.Tensor of shape (1, n_nodes) if predict=True,
+        otherwise torch.Tensor of shape (n_nodes, hidden_dim or output_dim),
+        depending on the final layer configuration.
+    """
+        
         x = x.view(1, 14, -1) # reshape so that each node's (asset's) features is own row
         if self.predict:
             return self.fc( self.gc1(x, adj).view(1, -1) )
         else:
             return self.gc1(x, adj)
+
+
+

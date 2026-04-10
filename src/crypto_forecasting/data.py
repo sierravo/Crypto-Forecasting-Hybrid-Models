@@ -1,12 +1,17 @@
 import pandas as pd
 import os
+import numpy as np
 
 from torch.utils.data import IterableDataset
 
 from .utils import *
 
 
-LOCAL_PATH_TO_DIR = os.getcwd() # '~/Documents/Academics/Columbia/2021/2021 Fall/Advanced ML/Final Project'
+from pathlib import Path
+
+PACKAGE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = PACKAGE_ROOT.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
 
 
 class CryptoFeed(IterableDataset):
@@ -20,17 +25,17 @@ class CryptoFeed(IterableDataset):
             technicals: dict, string (key) mapped to function (value) that calculates technical indicator from df
             evaluation: bool, if true then take last 10k of samples as validation set, otherwise use first 90k steps as training
         """
-        if os.path.exists('data/filtered_features.csv'):
+        if os.path.exists(DATA DIR / "filtered_features.csv"):
             if evaluation:
                 # take last 10k for validation set
-                self.features = pd.read_csv('data/filtered_features.csv').set_index('timestamp').iloc[-10000:]
-                self.targets = pd.read_csv('data/filtered_targets.csv').set_index('timestamp').iloc[-10000:]
-                self.log_returns = pd.read_csv('data/filtered_log_returns.csv').set_index('timestamp').iloc[-10000:]
+                self.features = pd.read_csv(DATA DIR / "filtered_features.csv").set_index('timestamp').iloc[-10000:]
+                self.targets = pd.read_csv(DATA DIR / "filtered_targets.csv").set_index('timestamp').iloc[-10000:]
+                self.log_returns = pd.read_csv(DATA DIR / "filtered_log_returns.csv").set_index('timestamp').iloc[-10000:]
             else:
                 # take first 90k as training set
-                self.features = pd.read_csv('data/filtered_features.csv').set_index('timestamp').iloc[:-10000]
-                self.targets = pd.read_csv('data/filtered_targets.csv').set_index('timestamp').iloc[:-10000]
-                self.log_returns = pd.read_csv('data/filtered_log_returns.csv').set_index('timestamp').iloc[:-10000]
+                self.features = pd.read_csv(DATA DIR / "filtered_features.csv").set_index('timestamp').iloc[:-10000]
+                self.targets = pd.read_csv(DATA DIR / "filtered_targets.csv").set_index('timestamp').iloc[:-10000]
+                self.log_returns = pd.read_csv(DATA DIR / "filtered_log_returns.csv").set_index('timestamp').iloc[:-10000]
         else:
             # only use last 100k timesteps to save computation time
             accepted_timestamp_threshold = sorted(df['timestamp'].unique())[-100000]
@@ -47,7 +52,6 @@ class CryptoFeed(IterableDataset):
 
             if technicals is not None:
                 for tdf in self.data:
-                    print(tdf['Asset_Name'].unique()) # for tracking progress, comment out later
                     for k, v in technicals.items():
                         tdf[k] = v(tdf)
             for tdf in self.data:
@@ -60,9 +64,9 @@ class CryptoFeed(IterableDataset):
             self.features = pd.concat(self.data, axis=1)
 
             # save to file so only do once
-            self.features.to_csv('data/filtered_features.csv')
-            self.targets.to_csv('data/filtered_targets.csv')
-            self.log_returns.to_csv('data/filtered_log_returns.csv')
+            self.features.to_csv(DATA DIR / "filtered_features.csv")
+            self.targets.to_csv(DATA DIR / "filtered_targets.csv")
+            self.log_returns.to_csv(DATA DIR / "filtered_log_returns.csv")
 
             if evaluation:
                 # use last 10k as validation set
@@ -88,6 +92,21 @@ class CryptoFeed(IterableDataset):
         return self.features.shape[0]
     
     def __iter__(self):
+    """
+    Yield one sample at a time for model training or evaluation.
+
+    Yields:
+        tuple:
+            features: np.ndarray or torch.Tensor of shape (seq_len, total_feature_dim),
+                where total_feature_dim = n_assets * features_per_asset
+
+            target: np.ndarray or torch.Tensor of shape (n_assets,),
+                one target value per asset
+
+            adj: np.ndarray or torch.Tensor of shape (n_assets, n_assets),
+                adjacency matrix describing relationships between assets
+    """
+        
         for i in range(self.seq_len, len(self.valid_dates)):
             dates_idx = self.valid_dates[i-self.seq_len:i]
             features = self.features.loc[dates_idx].values
@@ -97,11 +116,11 @@ class CryptoFeed(IterableDataset):
 
 
 def get_crypto_dataset(seq_len=5, technicals=None, evaluation=False):
-    file_path = os.path.join(LOCAL_PATH_TO_DIR, 'data/g-research-crypto-forecasting/train.csv')
+    file_path = DATA_DIR / "g-research-crypto-forecasting" / "train.csv"
     data = pd.read_csv(file_path)
     data['timestamp'] = pd.to_datetime(data['timestamp'], unit='s')
 
-    file_path = os.path.join(LOCAL_PATH_TO_DIR, 'data/g-research-crypto-forecasting/asset_details.csv')
+    file_path = DATA_DIR / "g-research-crypto-forecasting" / "asset_details.csv"
     asset_details = pd.read_csv(file_path)
     id_to_names = dict(zip(asset_details['Asset_ID'], asset_details['Asset_Name']))
     data['Asset_Name'] = [id_to_names[a] for a in data['Asset_ID']]
@@ -110,3 +129,64 @@ def get_crypto_dataset(seq_len=5, technicals=None, evaluation=False):
 
     dataset = CryptoFeed(data, seq_len, technicals, evaluation)
     return dataset
+
+class MockCryptoFeed(IterableDataset):
+    def __init__(self, seq_len=10, n_assets=14, features_per_asset=7, n_samples=100, seed=42):
+        self.seq_len = seq_len
+        self.n_assets = n_assets
+        self.features_per_asset = features_per_asset
+        self.n_samples = n_samples
+        self.total_features = n_assets * features_per_asset
+        self.rng = np.random.default_rng(seed)
+
+    def __len__(self):
+        return self.n_samples
+
+    def __iter__(self):
+        for _ in range(self.n_samples):
+            features = self.rng.normal(size=(self.seq_len, self.total_features)).astype(np.float32)
+            target = self.rng.normal(size=(self.n_assets,)).astype(np.float32)
+
+            adj = self.rng.normal(size=(self.n_assets, self.n_assets)).astype(np.float32)
+            adj = (adj + adj.T) / 2.0
+            np.fill_diagonal(adj, 1.0)
+
+            yield (
+                torch.tensor(features),
+                torch.tensor(target),
+                torch.tensor(adj)
+            )
+
+def get_mock_crypto_dataset(seq_len=10, technicals=None, evaluation=False, n_samples=100):
+    """
+    Create a small synthetic dataset for smoke tests.
+
+    Args:
+        seq_len: int.
+            Number of time steps per sample.
+
+        technicals: dict or None.
+            Mapping of technical indicator names to feature builders.
+            Used only to determine feature dimensionality.
+
+        evaluation: bool.
+            Included for interface compatibility with the real dataset loader.
+
+        n_samples: int.
+            Number of synthetic samples to generate.
+
+    Returns:
+        MockCryptoFeed yielding tuples of:
+            - features: shape (seq_len, total_feature_dim)
+            - target: shape (14,)
+            - adj: shape (14, 14)
+    """
+    features_per_asset = 7 + (0 if technicals is None else len(technicals))
+    return MockCryptoFeed(
+        seq_len=seq_len,
+        n_assets=14,
+        features_per_asset=features_per_asset,
+        n_samples=n_samples
+    )
+
+    

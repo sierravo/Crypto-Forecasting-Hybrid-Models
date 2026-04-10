@@ -2,7 +2,7 @@ from typing import ForwardRef
 import torch
 import torch.nn as nn
 
-from .components import *
+from .components import GCN, LSTM
 
 
 class AdditiveGraphLSTM(BaseModel):
@@ -35,6 +35,21 @@ class AdditiveGraphLSTM(BaseModel):
         self.lstm_hidden_state = (torch.zeros(self.lstm_n_layers, batch_size, 14), torch.zeros(self.lstm_n_layers, batch_size, 14))
 
     def forward(self, x, adj):
+    """
+    Combine LSTM and GCN predictions using a learned weighted sum.
+
+    Args:
+        x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
+            Flattened time-series features across all assets.
+
+        adj: torch.Tensor of shape (n_nodes, n_nodes).
+            Adjacency matrix over assets.
+
+    Returns:
+        torch.Tensor of shape (batch_size, 14).
+        One prediction per asset.
+    """
+
         # feed through lstm
         lstm_output, hidden_state = self.lstm(x, self.lstm_hidden_state) # lstm wrapper only returns last output, don't need to index later
         self.lstm_hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
@@ -43,7 +58,7 @@ class AdditiveGraphLSTM(BaseModel):
         gcn_output = self.gcn(x[:, -1, :], adj).view(self.batch_size, -1) # get latest state since gcn rn takes in just one day's price data, flatten before fc
 
         # combine using learnable weights
-        self.model_weights = nn.Parameter(self.model_weights / self.model_weights.sum()) # normalize to sum to 1, wrap to be parameter
+        self.model_weights = self.model_weights / self.model_weights.sum() # normalize to sum to 1, wrap to be parameter
         final_output = self.model_weights[0]*lstm_output + self.model_weights[1]*gcn_output
 
         return final_output
@@ -77,6 +92,21 @@ class SequentialGraphLSTM(BaseModel):
         self.lstm_hidden_state = (torch.zeros(self.lstm_n_layers, batch_size, 14), torch.zeros(self.lstm_n_layers, batch_size, 14))
 
     def forward(self, x, adj=None):
+    """
+    Apply graph and sequence modeling in sequence.
+
+    Args:
+        x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
+            Flattened time-series features across all assets.
+
+        adj: torch.Tensor of shape (n_nodes, n_nodes).
+            Adjacency matrix over assets.
+
+    Returns:
+        torch.Tensor of shape (batch_size, 14).
+        One prediction per asset.
+    """
+        
         x = x.view(self.batch_size, 10, 14, -1).permute(2, 0, 1, 3) # reshape so that each node's (asset's) features is own row, have assets first
         seq_embeddings = []
         for features in x:
