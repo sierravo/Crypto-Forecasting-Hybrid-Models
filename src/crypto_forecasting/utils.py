@@ -8,31 +8,18 @@ import numpy as np
 import pandas as pd
 
 
-def EMA(df, window):
+def EMA(df, window, price_col="VWAP"):
     """
-    Calculates exponential moving average given price data and sliding window size
+    Calculates exponential moving average of VWAP using the standard EMA convention.
     """
-    scaler = np.exp(-1/window)
-    num = 0
-    denom = 0
-    exp_ma = []
-    for p in df['VWAP']:
-        num = scaler*num + p
-        denom = scaler*denom + 1
-        exp_ma.append(num/denom)
-    return exp_ma
+    return df[price_col].ewm(span=window, adjust=False).mean()
 
 
-def SMA(df, window):
+def SMA(df, window, price_col="VWAP"):
     """
-    Calculates exponential moving average given price data and sliding window size
+    Calculates simple moving average of VWAP over a rolling window.
     """
-    sma = []
-    for i in range(df.shape[0]):
-        start_idx = max(0, i-window)
-        sma.append(df.iloc[start_idx:i]['VWAP'].mean())
-                       
-    return sma
+    return df[price_col].rolling(window=window, min_periods=1).mean()
 
 
 def EMA_5(df):
@@ -57,54 +44,41 @@ def SMA_20(df):
 
 def SMA_50(df):
     return SMA(df, 50)
+    
 
-
-def RSI(df):
+def RSI(df, window=14, price_col="VWAP"):
     """
-    Calculates relative strength index on a 14-day lookback window (standard)
-    https://www.investopedia.com/terms/r/rsi.asp
+    Calculates Relative Strength Index (RSI) using a rolling window.
     """
-    rsi = []
-    for i in range(df.shape[0]):
-        if i < 15:
-            rsi.append(0)
-        else:
-            window = df.iloc[i-15:i]
-            changes = window['VWAP'].pct_change()
-            avg_gain = changes[changes > 0].sum() / 14
-            avg_loss = np.abs(changes[changes < 0].sum()) / 14
-            if avg_loss > 0:
-                rsi.append( 100 - 100 / (1 + avg_gain/avg_loss) )
-            else:
-                rsi.append(100)
-    return rsi
+    delta = df[price_col].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(window=window, min_periods=window).mean()
+    avg_loss = loss.rolling(window=window, min_periods=window).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    rsi = rsi.mask(avg_loss == 0, 100)
+    return rsi.fillna(0)
 
 
-def BollingerBands(df):
+def BollingerBands(df, window=20, price_col="VWAP"):
     """
     Calculates bollinger bands which is basically just 20 day lookback volatility
     https://school.stockcharts.com/doku.php?id=technical_indicators:bollinger_bands
     """
-    bb = []
-    for i in range(df.shape[0]):
-        start_idx = max(0, i-20)
-        window = df.iloc[start_idx:i]
-        vol = window['VWAP'].std()
-        bb.append(vol)
-    return bb
+    return df[price_col].rolling(window=window, min_periods=1).std()
 
 
-def StochasticOscillator(df):
-    stochastics = []
-    for i in range(df.shape[0]):
-        if i < 14:
-            stochastics.append(np.nan)
-        else:
-            price_window = df.iloc[i-14:i]['VWAP'].values
-            close = price_window[-1]
-            low = price_window.min()
-            high = price_window.max()
-            pct_k = 100 * (close - low) / (high - low)
-            stochastics.append(pct_k)
-    
-    return stochastics
+def StochasticOscillator(df, window=14, price_col="VWAP"):
+    """
+    Calculates %K stochastic oscillator from VWAP.
+    """
+    low = df[price_col].rolling(window=window, min_periods=window).min()
+    high = df[price_col].rolling(window=window, min_periods=window).max()
+    denom = high - low
+    pct_k = 100 * (df[price_col] - low) / denom
+    return pct_k.mask(denom == 0, 0.0)

@@ -18,14 +18,15 @@ from .combined_model import AdditiveGraphLSTM, SequentialGraphLSTM
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # where to perform training
 
 
-def evaluate(model, dataset, criterion, batch_size=1, dl_kws={}, mode='additive'):
+def evaluate(model, dataset, criterion, batch_size=1, dl_kws=None, mode='additive'):
     """
-    Function that trains a given model on a given dataset using user-defined optimizer/criterion
+    Function that evaluates a given model on a given dataset using user-defined optimizer/criterion
 
     Args:
         model: nn.Module, the model to be trained
@@ -34,31 +35,34 @@ def evaluate(model, dataset, criterion, batch_size=1, dl_kws={}, mode='additive'
         dl_kws: dict, any arguments to pass to DataLoader object
         mode: str, whether training is on lstm, gcn, or a combined model (additive or sequential)
     """
+    if dl_kws is None:
+        dl_kws = {}
+
     dataloader = DataLoader(dataset, batch_size=batch_size, **dl_kws)
-    steps_per_epoch = len(dataloader)
     model.to(device) # send model to desired training device
 
     model.eval()
     losses = []
-    for features, target, adj in tqdm(dataloader):
-        # any casting to correct datatypes here, send to device 
-        features, target, adj = features.float().to(device), target.float().to(device), adj.float().to(device)
 
-        if mode != 'gcn':
-            model.initialize_hidden_state(batch_size)
+    with torch.no_grad():
+        for features, target, adj in tqdm(dataloader):
+            features = features.float().to(device)
+            target = target.float().to(device)
+            adj = adj.float().to(device)
 
-        if mode == 'lstm':
-            # lstm only takes in sequence of features
-            output, hidden_state = model(features)
-            hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
-        else:
-            # gcn and combined model both use adjacency matrix
-            output = model(features, adj.squeeze())
-        loss = criterion(output, target) 
-        losses.append(loss.item())
-    
+            if mode != 'gcn':
+                model.initialize_hidden_state(features.shape[0], device=features.device)
+
+            if mode == 'lstm':
+                output, hidden_state = model(features)
+                hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
+            else:
+                output = model(features, adj.squeeze())
+
+            loss = criterion(output, target)
+            losses.append(loss.item())
+
     return losses
-
 
 def main(eval_model, technicals, model_name, use_mock_data = False):
 
@@ -73,7 +77,8 @@ def main(eval_model, technicals, model_name, use_mock_data = False):
     else:
         model = SequentialGraphLSTM(n_features=7+len(technicals), lstm_hidden_dim=14, gcn_pred_per_node=3) # 7 pre-existing features
     
-    model.load('checkpoints/{}.pth'.format(model_name))
+    checkpoint_path = CHECKPOINT_DIR / f"{model_name}.pth"
+    model.load(str(checkpoint_path), map_location=device)
     model.float()
     print('Model created.\n')
 
@@ -92,7 +97,7 @@ def main(eval_model, technicals, model_name, use_mock_data = False):
     criterion = nn.MSELoss()
     losses = evaluate(model, dataset, criterion, mode=eval_model)
 
-    RESULTS_DIR.mkdir(exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     with open(RESULTS_DIR / f"{model_name}_loss.txt", "w") as f:
         # output losses to file for later
         for l in losses:

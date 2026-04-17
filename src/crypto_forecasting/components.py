@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.linalg import sqrtm
 
 import torch
 import torch.nn as nn
@@ -16,13 +15,7 @@ class BaseModel(nn.Module):
         torch.save(self.state_dict(), path)
 
     def load(self, path, map_location=None):
-        if map_location is not None:
-            if map_location == 'cpu':
-                self.load_state_dict(torch.load(path, map_location=torch.device('cpu')))
-            else:
-                self.load_state_dict(torch.load(path, map_location=map_location))
-        else:
-            self.load_state_dict(torch.load(path))
+        self.load_state_dict(torch.load(path, map_location=map_location))
 
 
 class LSTM(BaseModel):
@@ -40,38 +33,47 @@ class LSTM(BaseModel):
         if predict:
             self.fc = nn.Linear(10*hidden_size, 14) # hard coded to sequences of length 10
 
-    def initialize_hidden_state(self, batch_size):
-        self.batch_size = batch_size
-        self.hidden_state = (torch.zeros(self.num_layers, batch_size, self.hidden_size), torch.zeros(self.num_layers, batch_size, self.hidden_size))
+    def initialize_hidden_state(self, batch_size, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+        self.hidden_state = (
+            torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device),
+            torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device),
+        )
 
     def forward(self, x, hidden_state=None):
-    """
-    Run the LSTM over a sequence of flattened asset features.
+        """
+        Run the LSTM over a sequence of flattened asset features.
 
-    Args:
-        x: torch.Tensor of shape (batch_size, seq_len, input_size), where:
-            - batch_size is the number of sequences in the batch
-            - seq_len is the number of time steps
-            - input_size is the total feature dimension across all assets
+        Args:
+            x: torch.Tensor of shape (batch_size, seq_len, input_size), where:
+                - batch_size is the number of sequences in the batch
+                - seq_len is the number of time steps
+                - input_size is the total feature dimension across all assets
 
-    Returns:
-        If predict=True:
-            tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
-            - predictions of shape (batch_size, 14)
-            - hidden state tuple (h_n, c_n), each of shape (1, batch_size, hidden_size)
+        Returns:
+            If predict=True:
+                tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
+                - predictions of shape (batch_size, 14)
+                - hidden state tuple (h_n, c_n), each of shape (1, batch_size, hidden_size)
 
-        Otherwise:
-            tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
-            - sequence output of shape (batch_size, seq_len, hidden_size)
-            - hidden state tuple (h_n, c_n)
-    """
+            Otherwise:
+                tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]
+                - sequence output of shape (batch_size, seq_len, hidden_size)
+                - hidden state tuple (h_n, c_n)
+        """
 
         if hidden_state is not None:
             self.hidden_state = hidden_state
+        elif not hasattr(self, "hidden_state") or self.hidden_state[0].shape[1] != x.shape[0]:
+            self.initialize_hidden_state(x.shape[0], x.device)
+
         output, hidden_state = self.lstm(x, self.hidden_state)
         self.hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
+
         if self.predict:
-            return self.fc( output.view(self.batch_size, -1) ), self.hidden_state
+            batch_size = x.shape[0]
+            return self.fc(output.reshape(batch_size, -1)), self.hidden_state
         else:
             return output[:, -1, :], self.hidden_state # just output of last in sequence
 
@@ -115,24 +117,24 @@ class GraphConv(nn.Module):
             raise ValueError("Activation must be 'relu' or 'tanh'.")
 
     def forward(self, x, a=None):
-    """
-    Apply one graph convolution step.
+        """
+        Apply one graph convolution step.
 
-    Args:
-        x: torch.Tensor of shape (n_nodes, in_dim).
-            Node feature matrix, where:
-            - n_nodes is the number of assets/nodes
-            - in_dim is the number of input features per node
+        Args:
+            x: torch.Tensor of shape (n_nodes, in_dim).
+                Node feature matrix, where:
+                - n_nodes is the number of assets/nodes
+                - in_dim is the number of input features per node
 
-        a: torch.Tensor of shape (n_nodes, n_nodes), optional.
-            Adjacency matrix. If not provided, uses the fixed adjacency
-            stored on the module.
+            a: torch.Tensor of shape (n_nodes, n_nodes), optional.
+                Adjacency matrix. If not provided, uses the fixed adjacency
+                stored on the module.
 
-    Returns:
-        torch.Tensor of shape (n_nodes, out_dim).
-        Transformed node features after adjacency aggregation,
-        linear transformation, activation, and bias.
-    """
+        Returns:
+            torch.Tensor of shape (n_nodes, out_dim).
+            Transformed node features after adjacency aggregation,
+            linear transformation, activation, and bias.
+        """
 
         if a is None:
             if self.a is None:
@@ -166,27 +168,40 @@ class GCN(BaseModel):
             self.fc = nn.Linear(14*n_pred_per_node, 14)
 
     def forward(self, x, adj=None):
-    """
-    Run the graph model on one sample.
+        """
+        Args:
+            x:
+                - (n_nodes, n_features), or
+                - (batch_size, n_nodes, n_features)
 
-    Args:
-        x: torch.Tensor of shape (n_nodes, n_features) or (1, n_nodes, n_features).
-            Node features for all assets.
+            adj:
+                - (n_nodes, n_nodes)
 
-        adj: torch.Tensor of shape (n_nodes, n_nodes).
-            Adjacency matrix describing asset relationships.
+        Returns:
+            If predict=True:
+                - (batch_size, 14)
+            Else:
+                - (batch_size, n_nodes, n_pred_per_node)
+                  or (n_nodes, n_pred_per_node) for a single sample
+        """
+        single_sample = False
 
-    Returns:
-        torch.Tensor of shape (1, n_nodes) if predict=True,
-        otherwise torch.Tensor of shape (n_nodes, hidden_dim or output_dim),
-        depending on the final layer configuration.
-    """
-        
-        x = x.view(1, 14, -1) # reshape so that each node's (asset's) features is own row
+        if x.dim() == 2:
+            x = x.unsqueeze(0)   # (1, n_nodes, n_features)
+            single_sample = True
+        elif x.dim() != 3:
+            raise ValueError(f"x must have shape (n_nodes, n_features) or (batch, n_nodes, n_features), got {x.shape}")
+
+        if adj is None:
+            raise ValueError("adj must be provided")
+
+        gc_out = self.gc1(x, adj)   # (batch, n_nodes, n_pred_per_node)
+
         if self.predict:
-            return self.fc( self.gc1(x, adj).view(1, -1) )
-        else:
-            return self.gc1(x, adj)
+            batch_size = x.shape[0]
+            return self.fc(gc_out.reshape(batch_size, -1))
 
+        if single_sample:
+            return gc_out.squeeze(0)
 
-
+        return gc_out

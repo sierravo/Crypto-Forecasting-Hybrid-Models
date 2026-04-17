@@ -36,14 +36,13 @@ def test_lstm_forward():
 
 
 def test_gcn_forward():
-    gcn = GCN(7, 2).float()
+    gcn = GCN(n_features=7, n_pred_per_node=2, predict=True).float()
 
     x = torch.randn(14, 7)
     adj = torch.eye(14, dtype=torch.float32)
 
     output = gcn(x, adj)
     assert output.shape == (1, 14)
-
 
 def test_additive_forward():
     model = AdditiveGraphLSTM(
@@ -125,3 +124,40 @@ def test_eval_smoke_by_mode(mode):
     os.remove(f"checkpoints/{model_name}.pth")
     os.remove(result_path)
 
+def test_train_smoke_lstm():
+    dataset = get_mock_crypto_dataset(seq_len=10, n_samples=5)
+
+    model = LSTM(input_size=98, hidden_size=14, batch_first=True, predict=True).float()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+    criterion = torch.nn.MSELoss()
+
+    trained_model, losses = train(
+        model=model,
+        dataset=dataset,
+        optimizer=optimizer,
+        criterion=criterion,
+        epochs=1,
+        mode="lstm",
+    )
+
+    assert len(losses) == 1
+    assert losses[0] >= 0
+
+def test_train_smoke_gcn():
+    dataset = get_mock_crypto_dataset(seq_len=1, n_samples=5)
+
+    model = GCN(n_features=7, n_pred_per_node=1, predict=True).float()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+    criterion = torch.nn.MSELoss()
+
+    trained_model, losses = train(
+        model=model,
+        dataset=dataset,
+        optimizer=optimizer,
+        criterion=criterion,
+        epochs=1,
+        mode="gcn",
+    )
+
+    assert len(losses) == 1
+    assert losses[0] >= 0

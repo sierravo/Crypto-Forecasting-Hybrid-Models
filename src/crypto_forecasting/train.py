@@ -28,7 +28,7 @@ FIGURE_DIR = PROJECT_ROOT / "figures"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # where to perform training
 
 
-def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={}, return_all=False, mode='additive'):
+def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws=None, return_all=False, mode='additive'):
     """
     Function that trains a given model on a given dataset using user-defined optimizer/criterion
 
@@ -42,20 +42,24 @@ def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={
         return_all: bool, for debugging purposes - if True will return all objects to help observe states
         mode: str, whether training is on lstm, gcn, or a combined model (additive or sequential)
     """
+    if dl_kws is None:
+        dl_kws = {}
+
     dataloader = DataLoader(dataset, batch_size=batch_size, **dl_kws)
-    steps_per_epoch = len(dataloader)
     model.to(device) # send model to desired training device
 
     model.train()
     epoch_losses = []
+
     for e in range(epochs):
 
         print('Starting epoch {}...'.format(e))
 
         # add tqdm for progress tracking if desired
         epoch_avg_loss = 0
-        pbar = tqdm(dataloader) # for produce progress bar to track training
         n_iter = 0
+        pbar = tqdm(dataloader) # for produce progress bar to track training
+
         for features, target, adj in pbar:
             # any casting to correct datatypes here, send to device 
             features, target, adj = features.float().to(device), target.float().to(device), adj.float().to(device)
@@ -65,7 +69,7 @@ def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={
                 features = features[:, -1, :]
             else:
                 # need to initialize hidden state
-                model.initialize_hidden_state(batch_size)
+                model.initialize_hidden_state(features.shape[0], device=features.device)
 
             if mode == 'lstm':
                 # lstm only takes in sequence of features
@@ -87,7 +91,7 @@ def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={
             # torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
 
             optimizer.step()
-        epoch_losses.append( epoch_avg_loss / steps_per_epoch )
+        epoch_losses.append( epoch_avg_loss / n_iter )
 
         # lr_scheduler here if desired
 
@@ -100,14 +104,14 @@ def train(model, dataset, optimizer, criterion, epochs=2, batch_size=1, dl_kws={
 
 
 def plot_loss(losses, model_name):
-    FIGURE_DIR.mkdir("figures", exist_ok = True)
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
     fig = plt.figure(figsize=(10,5))
     plt.plot(range(len(losses)), losses)
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
+    fig.savefig(FIGURE_DIR / f"{model_name}_training_loss.pdf", bbox_inches="tight")
     plt.show()
-    fig.savefig(str(FIGURE_DIR /f"{model_name}_training_loss.pdf"))
 
 
 def main(mode, technicals, epochs, model_name, use_mock_data = False):
@@ -144,7 +148,7 @@ def main(mode, technicals, epochs, model_name, use_mock_data = False):
     model, losses = train(model, dataset, optimizer, criterion, epochs=epochs, mode=mode) # change up number of epochs depending on loss plot
     print('Model trained. Saving model...')
 
-    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     model.save(str(CHECKPOINT_DIR / f"{model_name}.pth"))
 
     print('Model saved.')

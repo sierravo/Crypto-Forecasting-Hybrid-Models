@@ -119,12 +119,19 @@ data/g-research-crypto-forecasting/
 
 Example:
 ```bash
-python crypto_forecasting.train --training_mode lstm --technicals_config technicals_config.json --
+python -m crypto_forecasting.train \
+  --training_mode lstm \
+  --technicals_config technicals_config.json \
+  --epochs 5 \
+  --model_name lstm_run
 ```
 
 5. Evaluate
 ```bash
-python -m crypto_forecasting.eval --eval_model lstm --technicals_config src/crypto_forecasting/technicals_config.json --model_name smoke_lstm --use_mock_data
+python -m crypto_forecasting.eval \
+  --eval_model lstm \
+  --technicals_config technicals_config.json \
+  --model_name lstm_run
 ```
 
 5. Testing
@@ -150,13 +157,22 @@ This is intended only for quick validation that the code runs end to end. It is 
 Train with mock data:
 
 ```bash
-python train.py --training_mode lstm --technicals_config technicals_config.json --epochs 1 --model_name smoke_lstm --use_mock_data
+python -m crypto_forecasting.train \
+  --training_mode lstm \
+  --technicals_config technicals_config.json \
+  --epochs 1 \
+  --model_name smoke_lstm \
+  --use_mock_data
 ```
 
 Evaluate with mock data:
 
 ```bash
-python eval.py --eval_model lstm --technicals_config technicals_config.json --model_name smoke_lstm --use_mock_data
+python -m crypto_forecasting.eval \
+  --eval_model lstm \
+  --technicals_config technicals_config.json \
+  --model_name smoke_lstm \
+  --use_mock_data
 ```
 
 You can replace lstm with gcn, additive, or sequential to test other model paths.

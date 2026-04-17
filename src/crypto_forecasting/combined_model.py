@@ -2,7 +2,7 @@ from typing import ForwardRef
 import torch
 import torch.nn as nn
 
-from .components import GCN, LSTM
+from .components import GCN, LSTM, BaseModel
 
 
 class AdditiveGraphLSTM(BaseModel):
@@ -29,37 +29,42 @@ class AdditiveGraphLSTM(BaseModel):
 
         self.model_weights = nn.Parameter(torch.ones(2))
 
-    def initialize_hidden_state(self, batch_size):
-        self.batch_size = batch_size
-        self.lstm.initialize_hidden_state(batch_size)
-        self.lstm_hidden_state = (torch.zeros(self.lstm_n_layers, batch_size, 14), torch.zeros(self.lstm_n_layers, batch_size, 14))
+    def initialize_hidden_state(self, batch_size, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+
+        self.lstm.initialize_hidden_state(batch_size, device=device)
+        self.lstm_hidden_state = (
+            torch.zeros(self.lstm_n_layers, batch_size, self.lstm_hidden_dim, device=device),
+            torch.zeros(self.lstm_n_layers, batch_size, self.lstm_hidden_dim, device=device),
+        )
 
     def forward(self, x, adj):
-    """
-    Combine LSTM and GCN predictions using a learned weighted sum.
+        """
+        Combine LSTM and GCN predictions using a learned weighted sum.
 
-    Args:
-        x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
-            Flattened time-series features across all assets.
+        Args:
+            x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
+                Flattened time-series features across all assets.
 
-        adj: torch.Tensor of shape (n_nodes, n_nodes).
-            Adjacency matrix over assets.
+            adj: torch.Tensor of shape (n_nodes, n_nodes).
+                Adjacency matrix over assets.
 
-    Returns:
-        torch.Tensor of shape (batch_size, 14).
-        One prediction per asset.
-    """
+        Returns:
+            torch.Tensor of shape (batch_size, 14).
+            One prediction per asset.
+        """
 
         # feed through lstm
         lstm_output, hidden_state = self.lstm(x, self.lstm_hidden_state) # lstm wrapper only returns last output, don't need to index later
         self.lstm_hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
 
         # feed through gcn
-        gcn_output = self.gcn(x[:, -1, :], adj).view(self.batch_size, -1) # get latest state since gcn rn takes in just one day's price data, flatten before fc
+        gcn_output = self.gcn(x[:, -1, :], adj).view(batch_size, -1) # get latest state since gcn rn takes in just one day's price data, flatten before fc
 
         # combine using learnable weights
-        self.model_weights = self.model_weights / self.model_weights.sum() # normalize to sum to 1, wrap to be parameter
-        final_output = self.model_weights[0]*lstm_output + self.model_weights[1]*gcn_output
+        weights = torch.softmax(self.model_weights, dim=0) # normalize to sum to 1
+        final_output = weights[0] * lstm_output + weights[1] * gcn_output
 
         return final_output
 
@@ -87,36 +92,45 @@ class SequentialGraphLSTM(BaseModel):
         self.gcn = GCN(lstm_hidden_dim, gcn_pred_per_node)
         self.fc = nn.Linear(14*gcn_pred_per_node, 14)
 
-    def initialize_hidden_state(self, batch_size):
-        self.batch_size = batch_size
-        self.lstm_hidden_state = (torch.zeros(self.lstm_n_layers, batch_size, 14), torch.zeros(self.lstm_n_layers, batch_size, 14))
+    def initialize_hidden_state(self, batch_size, device=None):
+        if device is None:
+            device = next(self.parameters()).device
+
+        self.lstm_hidden_state = (
+            torch.zeros(self.lstm_n_layers, batch_size, self.lstm_hidden_dim, device=device),
+            torch.zeros(self.lstm_n_layers, batch_size, self.lstm_hidden_dim, device=device),
+        )
 
     def forward(self, x, adj=None):
-    """
-    Apply graph and sequence modeling in sequence.
+        """
+        Apply graph and sequence modeling in sequence.
 
-    Args:
-        x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
-            Flattened time-series features across all assets.
+        Args:
+            x: torch.Tensor of shape (batch_size, seq_len, total_feature_dim).
+                Flattened time-series features across all assets.
 
-        adj: torch.Tensor of shape (n_nodes, n_nodes).
-            Adjacency matrix over assets.
+            adj: torch.Tensor of shape (n_nodes, n_nodes).
+                Adjacency matrix over assets.
 
-    Returns:
-        torch.Tensor of shape (batch_size, 14).
-        One prediction per asset.
-    """
+        Returns:
+            torch.Tensor of shape (batch_size, 14).
+            One prediction per asset.
+        """
+
+        batch_size = x.shape[0]
+        x = x.view(batch_size, 10, 14, -1).permute(2, 0, 1, 3) # reshape so that each node's (asset's) features is own row, have assets first
         
-        x = x.view(self.batch_size, 10, 14, -1).permute(2, 0, 1, 3) # reshape so that each node's (asset's) features is own row, have assets first
         seq_embeddings = []
+
         for features in x:
-            self.initialize_hidden_state(self.batch_size)
+            self.initialize_hidden_state(batch_size, device=features.device)
             lstm_output, hidden_state = self.lstm(features, self.lstm_hidden_state)
             self.hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
             seq_embeddings.append(lstm_output) # lstm wrapper only returns last output
+        
         gcn_input = torch.cat(seq_embeddings) # should be 14xlstm_hidden_dim here
         gcn_output = self.gcn(gcn_input, adj)
-        final_output = self.fc( gcn_output.view(self.batch_size, -1) )
+        final_output = self.fc( gcn_output.view(batch_size, -1) )
         return final_output
 
 
