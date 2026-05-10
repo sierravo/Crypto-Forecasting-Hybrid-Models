@@ -14,6 +14,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 
+def clean_numeric_array(arr):
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
 class CryptoFeed(IterableDataset):
     def __init__(self, df, seq_len=5, technicals=None, evaluation=False, split_ratio=0.9, max_timesteps=100000):
@@ -60,7 +62,9 @@ class CryptoFeed(IterableDataset):
                 [tdf.set_index("timestamp")["Close"] for tdf in self.data],
                 axis=1,
             )
-            self.log_returns = np.log(self.log_returns) - np.log(self.log_returns.shift(1))
+            prices = self.log_returns.replace(0, np.nan)
+            self.log_returns = np.log(prices) - np.log(prices.shift(1))
+            self.log_returns = self.log_returns.replace([np.inf, -np.inf], 0).fillna(0)
 
             if technicals is not None:
                 for tdf in self.data:
@@ -81,11 +85,37 @@ class CryptoFeed(IterableDataset):
             self.targets.to_csv(cached_targets_path)
             self.log_returns.to_csv(cached_log_returns_path)
 
-        self.features.ffill(0, inplace=True)
-        self.targets.ffill(0, inplace=True)
-        self.log_returns.ffill(0, inplace=True)
+        # 1. Fill missing values
+        self.features.ffill(inplace=True)
+        self.features.fillna(0, inplace=True)
+
+        self.targets.ffill(inplace=True)
+        self.targets.fillna(0, inplace=True)
+
+        self.log_returns.ffill(inplace=True)
+        self.log_returns.fillna(0, inplace=True)
+
+        # 2. Remove infinity values
+        self.features.replace([np.inf, -np.inf], 0, inplace=True)
+        self.targets.replace([np.inf, -np.inf], 0, inplace=True)
+        self.log_returns.replace([np.inf, -np.inf], 0, inplace=True)
+
+        # 3. Final missing-value cleanup
+        self.features.fillna(0, inplace=True)
+        self.targets.fillna(0, inplace=True)
+        self.log_returns.fillna(0, inplace=True)
 
         split_idx = int(len(self.features) * split_ratio)
+
+        # Fit normalization only on training data to avoid evaluation leakage
+        train_features = self.features.iloc[:split_idx]
+
+        feature_mean = train_features.mean()
+        feature_std = train_features.std().replace(0, 1)
+
+        # Apply training-set normalization stats to the full dataset
+        self.features = (self.features - feature_mean) / feature_std
+        self.features = self.features.replace([np.inf, -np.inf], 0).fillna(0)
 
         if evaluation:
             self.features = self.features.iloc[split_idx:]
@@ -120,9 +150,12 @@ class CryptoFeed(IterableDataset):
         
         for i in range(self.seq_len, len(self.valid_dates)):
             dates_idx = self.valid_dates[i-self.seq_len:i]
-            features = self.features.loc[dates_idx].values
-            target = self.targets.loc[dates_idx[-1]].values # target is target of end of window
-            adj = self.log_returns.loc[dates_idx].corr().ffill(value=0).values # correlation matrix between previous seq_len target values
+            features = clean_numeric_array(self.features.loc[dates_idx].values)
+            target = clean_numeric_array(self.targets.loc[dates_idx[-1]].values)
+
+            adj = self.log_returns.loc[dates_idx].corr().fillna(0).values
+            adj = clean_numeric_array(adj)
+
             yield features, target, adj
 
 
@@ -135,8 +168,8 @@ def get_crypto_dataset(seq_len=5, technicals=None, evaluation=False):
     asset_details = pd.read_csv(file_path)
     id_to_names = dict(zip(asset_details['Asset_ID'], asset_details['Asset_Name']))
     data['Asset_Name'] = [id_to_names[a] for a in data['Asset_ID']]
-    data.ffill(method='ffill', inplace=True)
-    data.ffill(value=0, inplace=True)
+    data.ffill(inplace=True)
+    data.fillna(0, inplace=True)
 
     dataset = CryptoFeed(data, seq_len, technicals, evaluation)
     return dataset
@@ -168,7 +201,7 @@ class MockCryptoFeed(IterableDataset):
                 torch.tensor(adj)
             )
 
-def get_mock_crypto_dataset(seq_len=10, technicals=None, evaluation=False, n_samples=100):
+def get_mock_crypto_dataset(seq_len=10, technicals=None, evaluation=False, n_samples=100, seed=42):
     """
     Create a small synthetic dataset for smoke tests.
 
@@ -197,7 +230,8 @@ def get_mock_crypto_dataset(seq_len=10, technicals=None, evaluation=False, n_sam
         seq_len=seq_len,
         n_assets=14,
         features_per_asset=features_per_asset,
-        n_samples=n_samples
+        n_samples=n_samples,
+        seed=seed
     )
 
     

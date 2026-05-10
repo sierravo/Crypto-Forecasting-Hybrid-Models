@@ -82,3 +82,132 @@ def StochasticOscillator(df, window=14, price_col="VWAP"):
     denom = high - low
     pct_k = 100 * (df[price_col] - low) / denom
     return pct_k.mask(denom == 0, 0.0)
+
+def compute_regression_metrics(y_true, y_pred, eps=1e-12):
+    """
+    Compute decision-oriented regression metrics for multi-asset forecasts.
+
+    Args:
+        y_true: array-like or torch.Tensor of shape (n_samples, n_assets) or compatible.
+        y_pred: array-like or torch.Tensor with the same shape as y_true.
+        eps: small float used to avoid divide-by-zero in optional calculations.
+
+    Returns:
+        dict with aggregate metrics:
+            - mse
+            - rmse
+            - mae
+            - directional_accuracy
+            - n_observations
+
+        If the input is 2D, also includes per-asset metrics:
+            - per_asset_mse
+            - per_asset_rmse
+            - per_asset_mae
+            - per_asset_directional_accuracy
+    """
+    try:
+        import torch
+        if isinstance(y_true, torch.Tensor):
+            y_true = y_true.detach().cpu().numpy()
+        if isinstance(y_pred, torch.Tensor):
+            y_pred = y_pred.detach().cpu().numpy()
+    except ImportError:
+        pass
+
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+
+    if y_true.shape != y_pred.shape:
+        raise ValueError(f"y_true and y_pred must have the same shape. Got {y_true.shape} and {y_pred.shape}.")
+
+    errors = y_pred - y_true
+    squared_errors = errors ** 2
+    absolute_errors = np.abs(errors)
+
+    metrics = {
+        "mse": float(np.mean(squared_errors)),
+        "rmse": float(np.sqrt(np.mean(squared_errors))),
+        "mae": float(np.mean(absolute_errors)),
+        "directional_accuracy": float(np.mean(np.sign(y_pred) == np.sign(y_true))),
+        "n_observations": int(y_true.size),
+    }
+
+    if y_true.ndim == 2:
+        per_asset_mse = np.mean(squared_errors, axis=0)
+        per_asset_rmse = np.sqrt(per_asset_mse)
+        per_asset_mae = np.mean(absolute_errors, axis=0)
+        per_asset_directional_accuracy = np.mean(np.sign(y_pred) == np.sign(y_true), axis=0)
+
+        metrics.update({
+            "per_asset_mse": per_asset_mse.tolist(),
+            "per_asset_rmse": per_asset_rmse.tolist(),
+            "per_asset_mae": per_asset_mae.tolist(),
+            "per_asset_directional_accuracy": per_asset_directional_accuracy.tolist(),
+        })
+
+    return metrics
+
+
+
+def set_random_seed(seed=42):
+    """
+    Set random seeds for reproducible training and evaluation runs.
+    """
+    import random
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
+
+
+def get_technical_registry():
+    """
+    Return a safe registry mapping config strings to technical indicator functions.
+
+    This replaces eval()-based loading so JSON config values must match known
+    indicator names.
+    """
+    return {
+        "EMA_5": EMA_5,
+        "EMA_20": EMA_20,
+        "EMA_50": EMA_50,
+        "SMA_5": SMA_5,
+        "SMA_20": SMA_20,
+        "SMA_50": SMA_50,
+        "RSI": RSI,
+        "BollingerBands": BollingerBands,
+        "StochasticOscillator": StochasticOscillator,
+    }
+
+
+def resolve_technicals_config(config):
+    """
+    Convert a JSON technical-indicator config into callable functions.
+
+    Args:
+        config: dict mapping output feature names to registry keys.
+
+    Returns:
+        dict mapping output feature names to callable functions.
+    """
+    registry = get_technical_registry()
+    resolved = {}
+
+    for feature_name, function_name in config.items():
+        if function_name not in registry:
+            valid = ", ".join(sorted(registry.keys()))
+            raise ValueError(
+                f"Unknown technical indicator '{function_name}' for feature '{feature_name}'. "
+                f"Valid options are: {valid}"
+            )
+        resolved[feature_name] = registry[function_name]
+
+    return resolved

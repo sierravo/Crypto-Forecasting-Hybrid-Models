@@ -60,7 +60,9 @@ class AdditiveGraphLSTM(BaseModel):
         self.lstm_hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
 
         # feed through gcn
-        gcn_output = self.gcn(x[:, -1, :], adj).view(batch_size, -1) # get latest state since gcn rn takes in just one day's price data, flatten before fc
+        batch_size = x.shape[0]
+        x_last = x[:, -1, :].view(batch_size, 14, self.n_features)
+        gcn_output = self.gcn(x_last, adj) # get latest state and restore node-level asset features before GCN
 
         # combine using learnable weights
         weights = torch.softmax(self.model_weights, dim=0) # normalize to sum to 1
